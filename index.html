@@ -145,10 +145,16 @@
 
   <!-- LOGIN -->
   <div id="login-screen">
-    <h2>🔐 Who are you?</h2>
-    <p>Select your name to track your progress separately from your teammate.</p>
-    <button class="name-btn"       onclick="setUser('Nelson')">Nelson (IT Manager)</button>
-    <button class="name-btn green" onclick="setUser('Teammate')">Teammate (IT Team)</button>
+    <h2>🔐 Audit Checklist Login</h2>
+    <p>Access restricted to authorized team members only.</p>
+    <input id="login-email" type="email" placeholder="your@email.com"
+      style="display:block;width:100%;padding:12px;margin-bottom:12px;border-radius:8px;
+      border:1px solid #334155;background:#0f1117;color:#e2e8f0;font-size:0.95rem;"/>
+    <input id="login-password" type="password" placeholder="Password"
+      style="display:block;width:100%;padding:12px;margin-bottom:16px;border-radius:8px;
+      border:1px solid #334155;background:#0f1117;color:#e2e8f0;font-size:0.95rem;"/>
+    <button class="name-btn" onclick="doLogin()">Sign In</button>
+    <div id="login-error" style="color:#f87171;font-size:0.85rem;margin-top:10px;"></div>
   </div>
 
   <!-- MAIN APP -->
@@ -413,13 +419,10 @@ logging on</code></div></li>
 </div>
 
 <!-- Supabase JS via CDN — no npm needed -->
-<!-- Supabase JS via CDN — no npm needed -->
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 <script>
-  // ─── REPLACE THESE TWO VALUES ────────────────────────────────────────────
-  const SUPABASE_URL  = 'https://jtavxfalizylylosaloi.supabase.co';
-  const SUPABASE_KEY  = 'sb_publishable_zWhxUBBCVu_UIh1961dtAQ_5zKMAJSv';
-  // ─────────────────────────────────────────────────────────────────────────
+  const SUPABASE_URL = 'https://jtavxfalizylylosaloi.supabase.co';
+  const SUPABASE_KEY = 'sb_publishable_zWhxUBBCVu_UIh1961dtAQ_5zKMAJSv';
 
   const { createClient } = supabase;
   const sb = createClient(SUPABASE_URL, SUPABASE_KEY);
@@ -427,8 +430,92 @@ logging on</code></div></li>
   let currentUser = null;
   let presenceChannel = null;
 
-  window.setUser = async function(name) {
-    currentUser = name;
+  // Update these emails to match exactly what you created in Supabase Auth
+  const DISPLAY_NAMES = {
+    'nelsonr@hunterbusinessschool.edu': 'Nelson',
+    'ypantaratos@hunterbusinessschool.edu': 'Yianni'
+  };
+
+  document.addEventListener('DOMContentLoaded', async function() {
+    // Re-check session on load so login persists across page refreshes
+    const { data: { session } } = await sb.auth.getSession();
+    if (session) {
+      await initApp(session.user);
+    }
+
+    // Allow Enter key on password field
+    const pwField = document.getElementById('login-password');
+    if (pwField) {
+      pwField.addEventListener('keydown', function(e) {
+        if (e.key === 'Enter') window.doLogin();
+      });
+    }
+
+    // Attach checkbox click handlers
+    document.querySelectorAll('.checklist li[data-id]').forEach(li => {
+      li.addEventListener('click', async function() {
+        if (!currentUser) return;
+        const id   = li.dataset.id;
+        const done = !li.classList.contains('done');
+
+        // Optimistic UI — toggle instantly
+        if (done) {
+          li.classList.add('done');
+          setCheckerBadge(li, currentUser);
+        } else {
+          li.classList.remove('done');
+          removeCheckerBadge(li);
+        }
+        updateProgress();
+
+        const { error } = await sb.from('checklist').upsert({
+          id,
+          done,
+          checked_by: done ? currentUser : null,
+          updated_at: new Date().toISOString()
+        }, { onConflict: 'id' });
+
+        if (error) {
+          console.error('upsert error:', error);
+          if (done) { li.classList.remove('done'); removeCheckerBadge(li); }
+          else { li.classList.add('done'); }
+          updateProgress();
+          alert('Save failed: ' + error.message);
+        }
+      });
+    });
+  });
+
+  window.doLogin = async function() {
+    const email    = document.getElementById('login-email').value.trim();
+    const password = document.getElementById('login-password').value;
+    const errEl    = document.getElementById('login-error');
+    const btn      = document.querySelector('#login-screen .name-btn');
+    errEl.textContent = '';
+    btn.textContent = 'Signing in...';
+    btn.disabled = true;
+
+    const { data, error } = await sb.auth.signInWithPassword({ email, password });
+
+    btn.textContent = 'Sign In';
+    btn.disabled = false;
+
+    if (error) {
+      errEl.textContent = '\u274c ' + error.message;
+      return;
+    }
+    await initApp(data.user);
+  };
+
+  window.doLogout = async function() {
+    await sb.auth.signOut();
+    location.reload();
+  };
+
+  async function initApp(user) {
+    const email = user.email;
+    currentUser = DISPLAY_NAMES[email] || email;
+
     document.getElementById('login-screen').style.display = 'none';
     document.getElementById('app').style.display = 'block';
 
@@ -437,21 +524,21 @@ logging on</code></div></li>
     sb.channel('checklist-changes')
       .on('postgres_changes',
         { event: '*', schema: 'public', table: 'checklist' },
-        (payload) => { handleRemoteChange(payload); }
+        (payload) => handleRemoteChange(payload)
       )
       .subscribe();
 
     presenceChannel = sb.channel('presence-room', {
-      config: { presence: { key: name } }
+      config: { presence: { key: currentUser } }
     });
     presenceChannel
       .on('presence', { event: 'sync' }, () => updateOnlineBar())
       .subscribe(async (status) => {
         if (status === 'SUBSCRIBED') {
-          await presenceChannel.track({ user: name, online_at: new Date().toISOString() });
+          await presenceChannel.track({ user: currentUser, online_at: new Date().toISOString() });
         }
       });
-  };
+  }
 
   async function loadState() {
     const { data, error } = await sb.from('checklist').select('*');
@@ -479,59 +566,13 @@ logging on</code></div></li>
     applyRow(payload.eventType === 'DELETE' ? { id: row.id, done: false } : row);
   }
 
-  // Attach click handlers after DOM is ready
-  document.addEventListener('DOMContentLoaded', function() {
-    document.querySelectorAll('.checklist li[data-id]').forEach(li => {
-      li.addEventListener('click', async function(e) {
-        if (!currentUser) {
-          alert('Please select your name first.');
-          return;
-        }
-        const id   = li.dataset.id;
-        const done = !li.classList.contains('done');
-
-        // Optimistic UI — toggle immediately so it feels instant
-        if (done) {
-          li.classList.add('done');
-          setCheckerBadge(li, currentUser);
-        } else {
-          li.classList.remove('done');
-          removeCheckerBadge(li);
-        }
-        updateProgress();
-
-        // Persist to Supabase
-        const { error } = await sb.from('checklist').upsert({
-          id,
-          done,
-          checked_by: done ? currentUser : null,
-          updated_at: new Date().toISOString()
-        }, { onConflict: 'id' });
-
-        if (error) {
-          console.error('upsert error:', error);
-          // Revert optimistic update on failure
-          if (done) {
-            li.classList.remove('done');
-            removeCheckerBadge(li);
-          } else {
-            li.classList.add('done');
-          }
-          updateProgress();
-          alert('Failed to save. Check your Supabase table setup.');
-        }
-      });
-    });
-  });
-
   window.resetAll = async function() {
     if (!confirm('Reset ALL checkboxes for everyone? Cannot be undone.')) return;
     const ids = [...document.querySelectorAll('[data-id]')].map(el => el.dataset.id);
-    const { error } = await sb.from('checklist').upsert(
+    await sb.from('checklist').upsert(
       ids.map(id => ({ id, done: false, checked_by: null, updated_at: new Date().toISOString() })),
       { onConflict: 'id' }
     );
-    if (error) console.error('reset error:', error);
   };
 
   function updateOnlineBar() {
@@ -540,6 +581,7 @@ logging on</code></div></li>
     const online = Object.values(state).flat().map(p => p.user);
     const others = online.filter(n => n !== currentUser);
     let msg = `Logged in as: <strong>${currentUser}</strong>`;
+    msg += ` &nbsp;<button onclick="doLogout()" style="background:#1e2330;border:1px solid #334155;color:#94a3b8;padding:2px 10px;border-radius:5px;cursor:pointer;font-size:0.78rem;margin-left:8px;">Log out</button>`;
     if (others.length > 0) {
       msg += ` &nbsp;·&nbsp; <span style="color:#4ade80">● ${others.join(', ')} also online</span>`;
     } else {
@@ -554,7 +596,7 @@ logging on</code></div></li>
     if (!strong || !byUser) return;
     const badge = document.createElement('span');
     badge.className = 'checker-badge ' + (byUser === currentUser ? 'checker-you' : 'checker-them');
-    badge.textContent = byUser === currentUser ? '✓ You' : '✓ ' + byUser;
+    badge.textContent = byUser === currentUser ? '\u2713 You' : '\u2713 ' + byUser;
     strong.appendChild(badge);
   }
 
