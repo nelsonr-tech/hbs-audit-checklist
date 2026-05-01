@@ -413,6 +413,7 @@ logging on</code></div></li>
 </div>
 
 <!-- Supabase JS via CDN — no npm needed -->
+<!-- Supabase JS via CDN — no npm needed -->
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 <script>
   // ─── REPLACE THESE TWO VALUES ────────────────────────────────────────────
@@ -424,8 +425,6 @@ logging on</code></div></li>
   const sb = createClient(SUPABASE_URL, SUPABASE_KEY);
 
   let currentUser = null;
-
-  // ── Presence channel (shows who's online) ────────────────────────────────
   let presenceChannel = null;
 
   window.setUser = async function(name) {
@@ -433,18 +432,15 @@ logging on</code></div></li>
     document.getElementById('login-screen').style.display = 'none';
     document.getElementById('app').style.display = 'block';
 
-    // Load existing state from DB
     await loadState();
 
-    // Subscribe to realtime changes on the checklist table
     sb.channel('checklist-changes')
       .on('postgres_changes',
         { event: '*', schema: 'public', table: 'checklist' },
-        (payload) => handleRemoteChange(payload)
+        (payload) => { handleRemoteChange(payload); }
       )
       .subscribe();
 
-    // Presence — track who's online
     presenceChannel = sb.channel('presence-room', {
       config: { presence: { key: name } }
     });
@@ -459,7 +455,7 @@ logging on</code></div></li>
 
   async function loadState() {
     const { data, error } = await sb.from('checklist').select('*');
-    if (error) { console.error(error); return; }
+    if (error) { console.error('loadState error:', error); return; }
     data.forEach(row => applyRow(row));
     updateProgress();
   }
@@ -474,45 +470,75 @@ logging on</code></div></li>
       li.classList.remove('done');
       removeCheckerBadge(li);
     }
+    updateProgress();
   }
 
   function handleRemoteChange(payload) {
     const row = payload.new || payload.old;
     if (!row) return;
     applyRow(payload.eventType === 'DELETE' ? { id: row.id, done: false } : row);
-    updateProgress();
   }
 
-  // Attach click handlers
-  document.querySelectorAll('.checklist li[data-id]').forEach(li => {
-    li.onclick = async function() {
-      if (!currentUser) return;
-      const id   = li.dataset.id;
-      const done = !li.classList.contains('done');
-      const { error } = await sb.from('checklist').upsert({
-        id,
-        done,
-        checked_by: done ? currentUser : null,
-        updated_at: new Date().toISOString()
-      }, { onConflict: 'id' });
-      if (error) console.error(error);
-    };
+  // Attach click handlers after DOM is ready
+  document.addEventListener('DOMContentLoaded', function() {
+    document.querySelectorAll('.checklist li[data-id]').forEach(li => {
+      li.addEventListener('click', async function(e) {
+        if (!currentUser) {
+          alert('Please select your name first.');
+          return;
+        }
+        const id   = li.dataset.id;
+        const done = !li.classList.contains('done');
+
+        // Optimistic UI — toggle immediately so it feels instant
+        if (done) {
+          li.classList.add('done');
+          setCheckerBadge(li, currentUser);
+        } else {
+          li.classList.remove('done');
+          removeCheckerBadge(li);
+        }
+        updateProgress();
+
+        // Persist to Supabase
+        const { error } = await sb.from('checklist').upsert({
+          id,
+          done,
+          checked_by: done ? currentUser : null,
+          updated_at: new Date().toISOString()
+        }, { onConflict: 'id' });
+
+        if (error) {
+          console.error('upsert error:', error);
+          // Revert optimistic update on failure
+          if (done) {
+            li.classList.remove('done');
+            removeCheckerBadge(li);
+          } else {
+            li.classList.add('done');
+          }
+          updateProgress();
+          alert('Failed to save. Check your Supabase table setup.');
+        }
+      });
+    });
   });
 
   window.resetAll = async function() {
     if (!confirm('Reset ALL checkboxes for everyone? Cannot be undone.')) return;
     const ids = [...document.querySelectorAll('[data-id]')].map(el => el.dataset.id);
-    await sb.from('checklist').upsert(
-      ids.map(id => ({ id, done: false, checked_by: null })),
+    const { error } = await sb.from('checklist').upsert(
+      ids.map(id => ({ id, done: false, checked_by: null, updated_at: new Date().toISOString() })),
       { onConflict: 'id' }
     );
+    if (error) console.error('reset error:', error);
   };
 
   function updateOnlineBar() {
     if (!presenceChannel) return;
-    const state   = presenceChannel.presenceState();
-    const online  = Object.values(state).flat().map(p => p.user);
-    const others  = online.filter(n => n !== currentUser);
+    const state  = presenceChannel.presenceState();
+    const online = Object.values(state).flat().map(p => p.user);
+    const others = online.filter(n => n !== currentUser);
     let msg = `Logged in as: <strong>${currentUser}</strong>`;
     if (others.length > 0) {
       msg += ` &nbsp;·&nbsp; <span style="color:#4ade80">● ${others.join(', ')} also online</span>`;
